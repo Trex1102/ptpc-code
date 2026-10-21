@@ -1,0 +1,4 @@
+# CNN runtime (Python 3.8); install torch/torchvision and Detectron2 separately.
+-r ../ptpc-release/requirements.txt
+# Optional encoder ablations use timm's CLIP/MAE/SigLIP implementations.
+timm>=1.0,<1.1

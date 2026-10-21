@@ -1,0 +1,253 @@
+diff --git a/no_time_to_train/dataset/coco_ref_dataset.py b/no_time_to_train/dataset/coco_ref_dataset.py
+index 7e01662..164f537 100644
+--- a/no_time_to_train/dataset/coco_ref_dataset.py
++++ b/no_time_to_train/dataset/coco_ref_dataset.py
+@@ -696,6 +696,10 @@ class COCORefTestDataset(COCORefTrainDataset):
+ 
+ 
+     def evaluate(self, results, exp_folder=None, output_name=""):
++        # Converted Pascal VOC COCO-JSON files need not carry optional COCO
++        # metadata.  The pinned pycocotools loadRes() nevertheless indexes it.
++        # Supplying an empty mapping affects no image, annotation, or metric.
++        self.coco.dataset.setdefault("info", {})
+         coco_results = self.coco.loadRes(results)
+         if output_name != "":
+             # Save results into json file
+diff --git a/no_time_to_train/models/Sam2Matcher.py b/no_time_to_train/models/Sam2Matcher.py
+index 8e6d310..483240d 100644
+--- a/no_time_to_train/models/Sam2Matcher.py
++++ b/no_time_to_train/models/Sam2Matcher.py
+@@ -20,8 +20,8 @@ from sam2.utils.amg import batched_mask_to_box
+ 
+ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+ 
+-import dinov2.dinov2.models.vision_transformer as dinov2_vit
+-import dinov2.dinov2.utils.utils as dinov2_utils
++import dinov2.models.vision_transformer as dinov2_vit
++import dinov2.utils.utils as dinov2_utils
+ 
+ from no_time_to_train.models.matcher_utils import kmeans_pp, SAM2AutomaticMaskGenerator_Matcher
+ from no_time_to_train.models.model_utils import concat_all_gather
+diff --git a/no_time_to_train/models/Sam2MatchingBaseline.py b/no_time_to_train/models/Sam2MatchingBaseline.py
+index 959d58a..acbf19e 100644
+--- a/no_time_to_train/models/Sam2MatchingBaseline.py
++++ b/no_time_to_train/models/Sam2MatchingBaseline.py
+@@ -22,8 +22,8 @@ from sam2.utils.amg import batched_mask_to_box
+ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+ 
+ 
+-import dinov2.dinov2.models.vision_transformer as dinov2_vit
+-import dinov2.dinov2.utils.utils as dinov2_utils
++import dinov2.models.vision_transformer as dinov2_vit
++import dinov2.utils.utils as dinov2_utils
+ 
+ from no_time_to_train.models.matching_baseline_utils import SAM2AutomaticMaskGenerator_MatchingBaseline
+ from no_time_to_train.models.model_utils import concat_all_gather
+diff --git a/no_time_to_train/models/Sam2MatchingBaseline_noAMG.py b/no_time_to_train/models/Sam2MatchingBaseline_noAMG.py
+index 2e58d16..86a5f39 100644
+--- a/no_time_to_train/models/Sam2MatchingBaseline_noAMG.py
++++ b/no_time_to_train/models/Sam2MatchingBaseline_noAMG.py
+@@ -23,8 +23,8 @@ from sam2.utils.amg import batched_mask_to_box
+ 
+ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+ 
+-import dinov2.dinov2.models.vision_transformer as dinov2_vit
+-import dinov2.dinov2.utils.utils as dinov2_utils
++import dinov2.models.vision_transformer as dinov2_vit
++import dinov2.utils.utils as dinov2_utils
+ 
+ from no_time_to_train.models.matching_baseline_utils import kmeans, kmeans_decouple
+ from no_time_to_train.models.model_utils import concat_all_gather
+@@ -168,7 +168,12 @@ class Sam2MatchingBaselineNoAMG(nn.Module):
+         dataset_imgs_path=None,
+         class_names=None,
+         online_vis=False,
+-        vis_thr=0.5
++        vis_thr=0.5,
++        guard_base_prototypes_path=None,
++        guard_margin=0.05,
++        guard_suppression=0.3,
++        guard_lower=0.05,
++        guard_upper=1.0,
+     ):
+         super(Sam2MatchingBaselineNoAMG, self).__init__()
+ 
+@@ -270,6 +275,27 @@ class Sam2MatchingBaselineNoAMG(nn.Module):
+         memory_bank_cfg["feat_shape"] = (self.encoder_h * self.encoder_w, self.encoder_dim)
+         self._init_memory_bank(memory_bank_cfg)
+ 
++        self.guard_margin = float(guard_margin)
++        self.guard_suppression = float(guard_suppression)
++        self.guard_lower = float(guard_lower)
++        self.guard_upper = float(guard_upper)
++        if not (0.0 < self.guard_suppression <= 1.0):
++            raise ValueError("guard_suppression must lie in (0, 1]")
++        if self.guard_lower >= self.guard_upper:
++            raise ValueError("guard_lower must be below guard_upper")
++        if guard_base_prototypes_path:
++            guard_payload = torch.load(
++                guard_base_prototypes_path, map_location="cpu", weights_only=True
++            )
++            guard_prototypes = guard_payload.get("prototypes", guard_payload)
++            guard_prototypes = F.normalize(
++                torch.as_tensor(guard_prototypes, dtype=torch.float32), p=2, dim=-1
++            )
++        else:
++            guard_prototypes = torch.empty((0, self.encoder_dim), dtype=torch.float32)
++        self.register_buffer("guard_base_prototypes", guard_prototypes, persistent=False)
++        self.guard_enabled = self.guard_base_prototypes.shape[0] > 0
++
+         self._reset()
+ 
+     def _init_memory_bank(self, memory_bank_cfg):
+@@ -1947,6 +1973,10 @@ class Sam2MatchingBaselineNoAMG(nn.Module):
+                 "binary_masks": torch.zeros((0, ori_h, ori_w), device=device).bool(),
+                 "bboxes": torch.zeros((0, 4), device=device),
+                 "scores": torch.zeros((0,), device=device),
++                "baseline_scores": torch.zeros((0,), device=device),
++                "guard_fires": torch.zeros((0,), dtype=torch.bool, device=device),
++                "guard_max_base": torch.zeros((0,), device=device),
++                "guard_max_novel": torch.zeros((0,), device=device),
+                 "labels": torch.zeros((0,), dtype=torch.long, device=device),
+                 "image_info": input_dicts[0]["target_img_info"],
+             }]
+@@ -2024,6 +2054,28 @@ class Sam2MatchingBaselineNoAMG(nn.Module):
+         bboxes = bboxes[final_out_inds]
+         scores_out = scores_out[final_out_inds]
+         labels_out = labels_out[final_out_inds]
++        obj_feats_out = F.normalize(obj_feats_out[final_out_inds], p=2, dim=-1)
++
++        baseline_scores = scores_out.clone()
++        novel_prototypes = F.normalize(
++            self.mem_feats_ins_avg.mean(dim=1).to(dtype=obj_feats_out.dtype),
++            p=2,
++            dim=-1,
++        )
++        max_novel = (obj_feats_out @ novel_prototypes.t()).max(dim=1).values
++        if self.guard_enabled:
++            base_prototypes = self.guard_base_prototypes.to(dtype=obj_feats_out.dtype)
++            max_base = (obj_feats_out @ base_prototypes.t()).max(dim=1).values
++            in_band = (baseline_scores > self.guard_lower) & (baseline_scores <= self.guard_upper)
++            guard_fires = in_band & ((max_base - max_novel) > self.guard_margin)
++            scores_out = torch.where(
++                guard_fires,
++                baseline_scores * self.guard_suppression,
++                baseline_scores,
++            )
++        else:
++            max_base = torch.full_like(max_novel, float("-inf"))
++            guard_fires = torch.zeros_like(max_novel, dtype=torch.bool)
+ 
+         # score_to_analysis = torch.stack(
+         #     (
+@@ -2038,6 +2090,10 @@ class Sam2MatchingBaselineNoAMG(nn.Module):
+             binary_masks=masks_out_binary,
+             bboxes=bboxes,
+             scores=scores_out,  # select_scores_oracle[nms_keep_inds][pos_inds][final_out_inds], #, #
++            baseline_scores=baseline_scores,
++            guard_fires=guard_fires,
++            guard_max_base=max_base,
++            guard_max_novel=max_novel,
+             labels=labels_out,
+             # score_to_analysis=score_to_analysis,
+             image_info=input_dicts[0]["target_img_info"],
+diff --git a/no_time_to_train/models/Sam2MatchingBaseline_noAMG_model_and_memory.py b/no_time_to_train/models/Sam2MatchingBaseline_noAMG_model_and_memory.py
+index 64f5435..a9cc622 100644
+--- a/no_time_to_train/models/Sam2MatchingBaseline_noAMG_model_and_memory.py
++++ b/no_time_to_train/models/Sam2MatchingBaseline_noAMG_model_and_memory.py
+@@ -23,8 +23,8 @@ from sam2.utils.amg import batched_mask_to_box
+ 
+ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+ 
+-import dinov2.dinov2.models.vision_transformer as dinov2_vit
+-import dinov2.dinov2.utils.utils as dinov2_utils
++import dinov2.models.vision_transformer as dinov2_vit
++import dinov2.utils.utils as dinov2_utils
+ 
+ from no_time_to_train.models.matching_baseline_utils import kmeans, kmeans_decouple
+ from no_time_to_train.models.model_utils import concat_all_gather
+diff --git a/no_time_to_train/pl_wrapper/sam2matcher_pl.py b/no_time_to_train/pl_wrapper/sam2matcher_pl.py
+index 7b949b8..eef6b83 100644
+--- a/no_time_to_train/pl_wrapper/sam2matcher_pl.py
++++ b/no_time_to_train/pl_wrapper/sam2matcher_pl.py
+@@ -152,6 +152,8 @@ class Sam2MatcherLightningModel(LightningModule):
+             super(Sam2MatcherLightningModel, self).load_state_dict(state_dict, strict=False, assign=assign)
+ 
+     def _output_inqueue(self, output_dict):
++        baseline_scores = output_dict.get("baseline_scores")
++        guard_fires = output_dict.get("guard_fires")
+         results_per_img = dict(
+             masks=output_dict["binary_masks"].cpu().numpy(),
+             boxes=output_dict["bboxes"].cpu().numpy(),
+@@ -163,6 +165,23 @@ class Sam2MatcherLightningModel(LightningModule):
+         encoded_results_per_img = self.eval_dataset.encode_results([results_per_img])
+         self.output_queue.append(encoded_results_per_img)
+ 
++        if baseline_scores is not None:
++            baseline_per_img = dict(results_per_img)
++            baseline_per_img["scores"] = baseline_scores.cpu().numpy()
++            self.baseline_output_queue.append(
++                self.eval_dataset.encode_results([baseline_per_img])
++            )
++            self.guard_diagnostics_queue.append({
++                "image_id": results_per_img["img_id"],
++                "baseline_scores": baseline_scores.cpu().tolist(),
++                "guard_scores": output_dict["scores"].cpu().tolist(),
++                "guard_fires": guard_fires.cpu().tolist(),
++                "max_base": output_dict["guard_max_base"].cpu().tolist(),
++                "max_novel": output_dict["guard_max_novel"].cpu().tolist(),
++                "labels": output_dict["labels"].cpu().tolist(),
++                "boxes_xyxy": output_dict["bboxes"].cpu().tolist(),
++            })
++
+         score_to_analysis = output_dict.get("score_to_analysis", None)
+         if score_to_analysis is not None:
+             self.scalars_queue.append(score_to_analysis.cpu().numpy())
+@@ -203,6 +222,8 @@ class Sam2MatcherLightningModel(LightningModule):
+         # To store results
+         self.output_queue = []
+         self.scalars_queue = []
++        self.baseline_output_queue = []
++        self.guard_diagnostics_queue = []
+ 
+         # For clarity, each mode is an independent case although some modes may share similar logistic
+         if self.test_mode == "fill_memory":
+diff --git a/run_lightening.py b/run_lightening.py
+index e8f5b9d..c61a1b5 100644
+--- a/run_lightening.py
++++ b/run_lightening.py
+@@ -131,6 +131,18 @@ class SAM2RefLightningCLI(LightningCLI):
+                 results, size=len(self.trainer.model.eval_dataset)
+             )
+ 
++            baseline_results_all = None
++            diagnostics_all = None
++            if len(self.trainer.model.baseline_output_queue) > 0:
++                baseline_results_all = collect_results_cpu(
++                    copy.deepcopy(self.trainer.model.baseline_output_queue),
++                    size=len(self.trainer.model.eval_dataset),
++                )
++                diagnostics_all = collect_results_cpu(
++                    copy.deepcopy(self.trainer.model.guard_diagnostics_queue),
++                    size=len(self.trainer.model.eval_dataset),
++                )
++
+             if len(self.trainer.model.scalars_queue) > 0:
+                 scalars = copy.deepcopy(self.trainer.model.scalars_queue)
+                 scalars_all = collect_results_cpu(
+@@ -150,6 +162,15 @@ class SAM2RefLightningCLI(LightningCLI):
+                 if self.config.test.export_result is not None:
+                     with open(self.config.test.export_result, 'w') as f:
+                         json.dump(results_unpacked, f)
++                    if baseline_results_all is not None:
++                        baseline_unpacked = []
++                        for results_per_img in baseline_results_all:
++                            baseline_unpacked.extend(results_per_img)
++                        output_dir = os.path.dirname(self.config.test.export_result) or "."
++                        with open(os.path.join(output_dir, "predictions_baseline.json"), "w") as f:
++                            json.dump(baseline_unpacked, f)
++                        with open(os.path.join(output_dir, "guard_diagnostics.json"), "w") as f:
++                            json.dump(diagnostics_all, f)
+                 if self.model.test_mode == "test":
+                     # Naming the output file
+                     output_name = ""

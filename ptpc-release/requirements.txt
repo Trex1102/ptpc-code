@@ -1,0 +1,6 @@
+# Install the matching CUDA torch/torchvision builds and Detectron2 v0.3 first.
+numpy==1.24.4
+opencv-python==4.13.0.92
+scikit-learn==1.3.2
+pycocotools==2.0.7
+PyYAML==6.0.3

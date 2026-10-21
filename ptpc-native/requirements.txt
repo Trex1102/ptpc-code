@@ -1,0 +1,5 @@
+# Python >=3.10. Native hosts require their separate model dependencies.
+# These versions match the paper's CPU rescoring / paired-bootstrap environment.
+numpy==1.26.0
+pycocotools==2.0.10
+PyYAML==6.0.3
