@@ -141,4 +141,5 @@ The [native-host instructions](ptpc-native/README.md) cover Guard-only
 inference and paired image-bootstrap confidence intervals.
 
 ## Acknowledgments
-This repo uses codes from DeFRCN, MFDC heavily. We are grateful to them for the codes. 
+
+We thank the authors of [DeFRCN](https://github.com/er-muyue/DeFRCN), [MFDC](https://github.com/shuangw98/MFDC), [Detectron2](https://github.com/facebookresearch/detectron2), [DINO](https://github.com/facebookresearch/dino), [DINOv2](https://github.com/facebookresearch/dinov2), [CLIP](https://github.com/openai/CLIP), [OpenCLIP](https://github.com/mlfoundations/open_clip), [MAE](https://github.com/facebookresearch/mae), [timm](https://github.com/huggingface/pytorch-image-models), [FSOD-VFM](https://github.com/Intellindust-AI-Lab/FSOD-VFM), and [No-Time-to-Train](https://github.com/miquel-espinosa/no-time-to-train) for making their repositories publicly available.
