@@ -14,7 +14,6 @@ prediction order fixed.
 | `ptpc-mfdc/` | MFDC training, evaluation, and encoder ablations |
 | `ptpc-native/` | Guard on FSOD-VFM and No-Time-to-Train, plus paired bootstrap evaluation |
 | `ptpc-ablation-code/` | Guard-descriptor and selectivity ablations |
-| `ptpc-remote-patch/` | Competitive ResNet and Guard baseline overlays |
 
 ## Setup
 
